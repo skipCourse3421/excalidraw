@@ -122,6 +122,17 @@ export class ClassroomAudioRecorder {
     }
 
     const mediaRecorder = this.mediaRecorder;
+
+    if (mediaRecorder.state === "inactive") {
+      await Promise.allSettled(this.pendingUploads);
+      this.pendingUploads.clear();
+      this.stream?.getTracks().forEach((track) => track.stop());
+      this.stream = null;
+      this.mediaRecorder = null;
+      this.currentSegmentStartedAt = null;
+      return;
+    }
+
     const stopPromise = new Promise<void>((resolve) => {
       mediaRecorder.addEventListener(
         "stop",
@@ -132,9 +143,7 @@ export class ClassroomAudioRecorder {
       );
     });
 
-    if (mediaRecorder.state !== "inactive") {
-      mediaRecorder.stop();
-    }
+    mediaRecorder.stop();
 
     await stopPromise;
     await Promise.allSettled(this.pendingUploads);

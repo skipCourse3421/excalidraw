@@ -183,6 +183,29 @@ describe("whiteboardCapture", () => {
     ]);
   });
 
+  it("treats mixed move and resize changes as updates", () => {
+    expect(
+      deriveWhiteboardEvents({
+        previousElements: [
+          createElement({ id: "mixed", version: 1, width: 100 }),
+        ],
+        nextElements: [
+          createElement({ id: "mixed", version: 2, x: 30, width: 120 }),
+        ],
+        sessionId: "session-1",
+        userId: "user-1",
+        timestamp: "2026-09-22T17:00:00.000Z",
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        event_id: "session-1:mixed:2:update",
+        action: "update",
+        element_id: "mixed",
+        element_version: 2,
+      }),
+    ]);
+  });
+
   it("serializes event batches as jsonl", () => {
     expect(
       serializeWhiteboardEvents([

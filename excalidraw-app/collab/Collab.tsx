@@ -396,8 +396,7 @@ class Collab extends PureComponent<CollabProps, CollabState> {
   };
 
   componentWillUnmount() {
-    this.queueFlushWhiteboardEvents.cancel();
-    void this.classroomAudioRecorder?.stop();
+    void this.teardownClassroomSession();
     window.removeEventListener("online", this.onOfflineStatusToggle);
     window.removeEventListener("offline", this.onOfflineStatusToggle);
     window.removeEventListener(EVENT.BEFORE_UNLOAD, this.beforeUnload);
@@ -743,7 +742,6 @@ class Collab extends PureComponent<CollabProps, CollabState> {
 
   private teardownClassroomSession = async () => {
     this.queueFlushWhiteboardEvents.cancel();
-    await this.flushPendingWhiteboardEvents();
 
     if (
       this.classroomAudioRecorder &&
@@ -751,6 +749,8 @@ class Collab extends PureComponent<CollabProps, CollabState> {
     ) {
       await this.stopClassroomRecording({ keepReady: false });
     }
+
+    await this.flushPendingWhiteboardEvents();
 
     if (this.classroomSessionId && this.classroomUserId) {
       await markWhiteboardSessionParticipantLeft({
