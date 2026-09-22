@@ -96,14 +96,14 @@ export const buildCaptureBundleManifest = ({
   participants,
   started_at: startedAt,
   ended_at: endedAt,
-  artifact_id: artifactId,
-  project_group: projectGroup,
-  essay_name: essayName,
-  context,
+  ...(artifactId !== undefined ? { artifact_id: artifactId } : {}),
+  ...(projectGroup !== undefined ? { project_group: projectGroup } : {}),
+  ...(essayName !== undefined ? { essay_name: essayName } : {}),
+  ...(context !== undefined ? { context } : {}),
   files: {
     audio: audioFiles,
     event_log: WHITEBOARD_EVENT_LOG_PATH,
-    snapshot,
+    ...(snapshot !== undefined ? { snapshot } : {}),
   },
 });
 
@@ -147,7 +147,7 @@ export const deriveWhiteboardEvents = ({
     previousElements.map((element) => [element.id, element]),
   );
 
-  return nextElements.reduce<WhiteboardEvent[]>((events, element) => {
+  return nextElements.reduce<WhiteboardEvent[]>((events, element, index) => {
     const previous = previousElementsById.get(element.id);
 
     if (
@@ -160,7 +160,15 @@ export const deriveWhiteboardEvents = ({
     const action = getWhiteboardEventAction(previous, element);
 
     events.push({
-      event_id: `${sessionId}:${element.id}:${element.version}:${action}`,
+      event_id: [
+        sessionId,
+        userId,
+        timestamp,
+        index,
+        element.id,
+        element.version,
+        action,
+      ].join(":"),
       session_id: sessionId,
       user_id: userId,
       ts: timestamp,

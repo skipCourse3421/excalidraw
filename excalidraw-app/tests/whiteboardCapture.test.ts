@@ -96,7 +96,6 @@ describe("whiteboardCapture", () => {
           },
         ],
         event_log: "events/whiteboard_events.jsonl",
-        snapshot: undefined,
       },
     });
   });
@@ -131,7 +130,7 @@ describe("whiteboardCapture", () => {
       }),
     ).toEqual([
       {
-        event_id: "session-1:added:1:add",
+        event_id: "session-1:user-1:2026-09-22T17:00:00.000Z:0:added:1:add",
         session_id: "session-1",
         user_id: "user-1",
         ts: "2026-09-22T17:00:00.000Z",
@@ -141,7 +140,7 @@ describe("whiteboardCapture", () => {
         element_version: 1,
       },
       {
-        event_id: "session-1:moved:2:move",
+        event_id: "session-1:user-1:2026-09-22T17:00:00.000Z:1:moved:2:move",
         session_id: "session-1",
         user_id: "user-1",
         ts: "2026-09-22T17:00:00.000Z",
@@ -151,7 +150,8 @@ describe("whiteboardCapture", () => {
         element_version: 2,
       },
       {
-        event_id: "session-1:updated:2:update",
+        event_id:
+          "session-1:user-1:2026-09-22T17:00:00.000Z:2:updated:2:update",
         session_id: "session-1",
         user_id: "user-1",
         ts: "2026-09-22T17:00:00.000Z",
@@ -161,7 +161,8 @@ describe("whiteboardCapture", () => {
         element_version: 2,
       },
       {
-        event_id: "session-1:deleted:2:delete",
+        event_id:
+          "session-1:user-1:2026-09-22T17:00:00.000Z:3:deleted:2:delete",
         session_id: "session-1",
         user_id: "user-1",
         ts: "2026-09-22T17:00:00.000Z",
@@ -171,7 +172,7 @@ describe("whiteboardCapture", () => {
         element_version: 2,
       },
       {
-        event_id: "session-1:erased:2:erase",
+        event_id: "session-1:user-1:2026-09-22T17:00:00.000Z:4:erased:2:erase",
         session_id: "session-1",
         user_id: "user-1",
         ts: "2026-09-22T17:00:00.000Z",
@@ -198,7 +199,7 @@ describe("whiteboardCapture", () => {
       }),
     ).toEqual([
       expect.objectContaining({
-        event_id: "session-1:mixed:2:update",
+        event_id: "session-1:user-1:2026-09-22T17:00:00.000Z:0:mixed:2:update",
         action: "update",
         element_id: "mixed",
         element_version: 2,

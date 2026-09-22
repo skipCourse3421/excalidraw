@@ -85,9 +85,9 @@ import { LocalData } from "../data/LocalData";
 import {
   appendAudioFileToWhiteboardSession,
   createOrJoinWhiteboardSession,
+  ensureFirebaseUser,
   flushWhiteboardEventsToFirebase,
   getFirebaseIdToken,
-  getFirebaseUser,
   isSavedToFirebase,
   loadFilesFromFirebase,
   loadFromFirebase,
@@ -375,6 +375,7 @@ class Collab extends PureComponent<CollabProps, CollabState> {
         errorMessage: error.message || t("errors.collabSaveFailed"),
       });
       console.error(error);
+      throw error;
     }
   };
 
@@ -385,7 +386,7 @@ class Collab extends PureComponent<CollabProps, CollabState> {
    */
   private queueFlushWhiteboardEvents = throttle(
     () => {
-      void this.flushPendingWhiteboardEvents();
+      void this.flushPendingWhiteboardEvents().catch(() => {});
     },
     2000,
     { leading: false },
@@ -484,14 +485,10 @@ class Collab extends PureComponent<CollabProps, CollabState> {
     sessionId: string;
     role: ClassroomRole;
   }) => {
-    const user = getFirebaseUser();
-    if (!user) {
-      throw new Error("Classroom mode requires a signed-in Firebase user.");
-    }
+    const user = await ensureFirebaseUser();
 
     const now = new Date().toISOString();
-    const displayName =
-      user.displayName || user.email || this.state.username || user.uid;
+    const displayName = user.displayName || this.state.username || user.uid;
     const participant: ParticipantRef = {
       user_id: user.uid,
       display_name: displayName,
@@ -583,14 +580,16 @@ class Collab extends PureComponent<CollabProps, CollabState> {
   };
 
   stopClassroomRecording = async (opts?: { keepReady?: boolean }) => {
-    await this.classroomAudioRecorder?.stop();
-    this.setClassroomCaptureState({
-      isRecording: false,
-      isPaused: false,
-    });
-    this.classroomAudioRecorder = null;
-    if (opts?.keepReady !== false) {
-      this.initializeClassroomAudioRecorder();
+    try {
+      await this.classroomAudioRecorder?.stop();
+    } finally {
+      this.setClassroomCaptureState({
+        isRecording: false,
+        isPaused: false,
+      });
+      if (opts?.keepReady === false) {
+        this.classroomAudioRecorder = null;
+      }
     }
   };
 
@@ -816,17 +815,17 @@ class Collab extends PureComponent<CollabProps, CollabState> {
     this.portal.close();
     this.fileManager.reset();
     this.followedBy = new Set();
-    this.classroomAudioRecorder = null;
-    this.classroomSessionId = null;
-    this.classroomRole = null;
-    this.classroomStartedAt = null;
-    this.classroomStudentId = null;
-    this.classroomUserId = null;
-    this.classroomParticipants = [];
-    this.classroomAudioFiles = [];
-    this.pendingWhiteboardEvents = [];
-    this.lastCapturedElements = [];
     if (!opts?.isUnload) {
+      this.classroomAudioRecorder = null;
+      this.classroomSessionId = null;
+      this.classroomRole = null;
+      this.classroomStartedAt = null;
+      this.classroomStudentId = null;
+      this.classroomUserId = null;
+      this.classroomParticipants = [];
+      this.classroomAudioFiles = [];
+      this.pendingWhiteboardEvents = [];
+      this.lastCapturedElements = [];
       this.setIsCollaborating(false);
       this.setActiveRoomLink(null);
       appJotaiStore.set(userToFollowAtom, null);

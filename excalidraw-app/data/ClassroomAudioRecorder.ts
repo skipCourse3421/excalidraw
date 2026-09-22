@@ -124,12 +124,15 @@ export class ClassroomAudioRecorder {
     const mediaRecorder = this.mediaRecorder;
 
     if (mediaRecorder.state === "inactive") {
-      await Promise.allSettled(this.pendingUploads);
-      this.pendingUploads.clear();
-      this.stream?.getTracks().forEach((track) => track.stop());
-      this.stream = null;
-      this.mediaRecorder = null;
-      this.currentSegmentStartedAt = null;
+      try {
+        await Promise.all(this.pendingUploads);
+      } finally {
+        this.pendingUploads.clear();
+        this.stream?.getTracks().forEach((track) => track.stop());
+        this.stream = null;
+        this.mediaRecorder = null;
+        this.currentSegmentStartedAt = null;
+      }
       return;
     }
 
@@ -145,13 +148,15 @@ export class ClassroomAudioRecorder {
 
     mediaRecorder.stop();
 
-    await stopPromise;
-    await Promise.allSettled(this.pendingUploads);
-    this.pendingUploads.clear();
-
-    this.stream?.getTracks().forEach((track) => track.stop());
-    this.stream = null;
-    this.mediaRecorder = null;
-    this.currentSegmentStartedAt = null;
+    try {
+      await stopPromise;
+      await Promise.all(this.pendingUploads);
+    } finally {
+      this.pendingUploads.clear();
+      this.stream?.getTracks().forEach((track) => track.stop());
+      this.stream = null;
+      this.mediaRecorder = null;
+      this.currentSegmentStartedAt = null;
+    }
   };
 }

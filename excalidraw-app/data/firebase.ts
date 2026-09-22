@@ -8,7 +8,7 @@ import {
 import { restoreElements } from "@excalidraw/excalidraw/data/restore";
 import { getSceneVersion } from "@excalidraw/element";
 import { initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import { getAuth, onAuthStateChanged, signInAnonymously } from "firebase/auth";
 import {
   collection,
   getFirestore,
@@ -16,7 +16,6 @@ import {
   getDoc,
   runTransaction,
   Bytes,
-  setDoc,
   writeBatch,
 } from "firebase/firestore";
 import { getStorage, ref, uploadBytes } from "firebase/storage";
@@ -112,12 +111,35 @@ export const loadFirebaseAuth = async () => {
   return _getAuth();
 };
 
-export const getFirebaseIdToken = async () => {
-  const user = _getAuth().currentUser;
-  if (!user) {
-    return null;
+export const ensureFirebaseUser = async () => {
+  const auth = _getAuth();
+  if (auth.currentUser) {
+    return auth.currentUser;
   }
-  return user.getIdToken();
+
+  const restoredUser = await new Promise<
+    ReturnType<typeof getAuth>["currentUser"]
+  >((resolve, reject) => {
+    const unsubscribe = onAuthStateChanged(
+      auth,
+      (user) => {
+        unsubscribe();
+        resolve(user);
+      },
+      reject,
+    );
+  });
+
+  if (restoredUser) {
+    return restoredUser;
+  }
+
+  return (await signInAnonymously(auth)).user;
+};
+
+export const getFirebaseIdToken = async () => {
+  const user = await ensureFirebaseUser();
+  return user?.getIdToken() ?? null;
 };
 
 export const getFirebaseUser = () => _getAuth().currentUser;
@@ -266,6 +288,10 @@ const appendAudioFile = (
   return [...audioFiles, audioFile];
 };
 
+const getParticipantIds = (participants: ParticipantRef[]) => [
+  ...new Set(participants.map((participant) => participant.user_id)),
+];
+
 const getManifestFromSnapshot = (
   sessionId: string,
   snapshotData:
@@ -355,6 +381,7 @@ export const createOrJoinWhiteboardSession = async ({
       sessionDocRef,
       {
         manifest: nextManifest,
+        participant_ids: getParticipantIds(nextManifest.participants),
         updated_at: new Date().toISOString(),
       },
       { merge: true },
@@ -399,13 +426,13 @@ export const markWhiteboardSessionParticipantLeft = async ({
     const nextManifest = {
       ...manifest,
       participants,
-      ended_at: leftAt,
     };
 
     transaction.set(
       sessionDocRef,
       {
         manifest: nextManifest,
+        participant_ids: getParticipantIds(nextManifest.participants),
         updated_at: leftAt,
       },
       { merge: true },
@@ -451,6 +478,7 @@ export const appendAudioFileToWhiteboardSession = async ({
       sessionDocRef,
       {
         manifest: nextManifest,
+        participant_ids: getParticipantIds(nextManifest.participants),
         updated_at: new Date().toISOString(),
       },
       { merge: true },
@@ -467,38 +495,47 @@ export const updateWhiteboardSessionManifest = async ({
   sessionId: string;
   updates: Partial<CaptureBundleManifest>;
 }) => {
+  const firestore = _getFirestore();
   const sessionDocRef = getWhiteboardSessionDocRef(sessionId);
-  const snapshot = await getDoc(sessionDocRef);
-  if (!snapshot.exists()) {
-    return null;
-  }
+  return runTransaction(firestore, async (transaction) => {
+    const snapshot = await transaction.get(sessionDocRef);
+    if (!snapshot.exists()) {
+      return null;
+    }
 
-  const manifest = (snapshot.data() as { manifest?: CaptureBundleManifest })
-    .manifest;
-  if (!manifest) {
-    return null;
-  }
+    const manifest = (snapshot.data() as { manifest?: CaptureBundleManifest })
+      .manifest;
+    if (!manifest) {
+      return null;
+    }
 
-  const nextManifest: CaptureBundleManifest = {
-    ...manifest,
-    ...updates,
-    files: {
-      ...manifest.files,
-      ...updates.files,
-      audio: updates.files?.audio ?? manifest.files.audio,
-    },
-  };
+    const nextManifest: CaptureBundleManifest = {
+      ...manifest,
+      ...updates,
+      participants: updates.participants
+        ? updates.participants.reduce(mergeParticipant, manifest.participants)
+        : manifest.participants,
+      files: {
+        ...manifest.files,
+        ...updates.files,
+        audio: updates.files?.audio
+          ? updates.files.audio.reduce(appendAudioFile, manifest.files.audio)
+          : manifest.files.audio,
+      },
+    };
 
-  await setDoc(
-    sessionDocRef,
-    {
-      manifest: nextManifest,
-      updated_at: new Date().toISOString(),
-    },
-    { merge: true },
-  );
+    transaction.set(
+      sessionDocRef,
+      {
+        manifest: nextManifest,
+        participant_ids: getParticipantIds(nextManifest.participants),
+        updated_at: new Date().toISOString(),
+      },
+      { merge: true },
+    );
 
-  return nextManifest;
+    return nextManifest;
+  });
 };
 
 export const flushWhiteboardEventsToFirebase = async ({
@@ -513,7 +550,6 @@ export const flushWhiteboardEventsToFirebase = async ({
   }
 
   const firestore = _getFirestore();
-  const batch = writeBatch(firestore);
   const eventsCollectionRef = collection(
     firestore,
     "whiteboard_sessions",
@@ -521,11 +557,17 @@ export const flushWhiteboardEventsToFirebase = async ({
     "events",
   );
 
-  for (const event of events) {
-    batch.set(doc(eventsCollectionRef, event.event_id), event, { merge: true });
-  }
+  for (let index = 0; index < events.length; index += 500) {
+    const batch = writeBatch(firestore);
 
-  await batch.commit();
+    for (const event of events.slice(index, index + 500)) {
+      batch.set(doc(eventsCollectionRef, event.event_id), event, {
+        merge: true,
+      });
+    }
+
+    await batch.commit();
+  }
 };
 
 const createFirebaseSceneDocument = async (
