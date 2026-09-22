@@ -160,7 +160,7 @@ export const deriveWhiteboardEvents = ({
     const action = getWhiteboardEventAction(previous, element);
 
     events.push({
-      event_id: `${sessionId}:${element.id}:${element.version}`,
+      event_id: `${sessionId}:${element.id}:${element.version}:${action}`,
       session_id: sessionId,
       user_id: userId,
       ts: timestamp,

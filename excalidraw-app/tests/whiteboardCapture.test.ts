@@ -106,12 +106,19 @@ describe("whiteboardCapture", () => {
       createElement({ id: "moved", version: 1, x: 0, y: 0 }),
       createElement({ id: "updated", version: 1, width: 100 }),
       createElement({ id: "deleted", version: 1 }),
+      createElement({ id: "erased", version: 1, type: "freedraw" }),
     ];
     const nextElements = [
       createElement({ id: "added", version: 1 }),
       createElement({ id: "moved", version: 2, x: 40, y: 25 }),
       createElement({ id: "updated", version: 2, width: 120 }),
       createElement({ id: "deleted", version: 2, isDeleted: true }),
+      createElement({
+        id: "erased",
+        version: 2,
+        type: "freedraw",
+        isDeleted: true,
+      }),
     ];
 
     expect(
@@ -124,7 +131,7 @@ describe("whiteboardCapture", () => {
       }),
     ).toEqual([
       {
-        event_id: "session-1:added:1",
+        event_id: "session-1:added:1:add",
         session_id: "session-1",
         user_id: "user-1",
         ts: "2026-09-22T17:00:00.000Z",
@@ -134,7 +141,7 @@ describe("whiteboardCapture", () => {
         element_version: 1,
       },
       {
-        event_id: "session-1:moved:2",
+        event_id: "session-1:moved:2:move",
         session_id: "session-1",
         user_id: "user-1",
         ts: "2026-09-22T17:00:00.000Z",
@@ -144,7 +151,7 @@ describe("whiteboardCapture", () => {
         element_version: 2,
       },
       {
-        event_id: "session-1:updated:2",
+        event_id: "session-1:updated:2:update",
         session_id: "session-1",
         user_id: "user-1",
         ts: "2026-09-22T17:00:00.000Z",
@@ -154,13 +161,23 @@ describe("whiteboardCapture", () => {
         element_version: 2,
       },
       {
-        event_id: "session-1:deleted:2",
+        event_id: "session-1:deleted:2:delete",
         session_id: "session-1",
         user_id: "user-1",
         ts: "2026-09-22T17:00:00.000Z",
         action: "delete",
         element_type: "rectangle",
         element_id: "deleted",
+        element_version: 2,
+      },
+      {
+        event_id: "session-1:erased:2:erase",
+        session_id: "session-1",
+        user_id: "user-1",
+        ts: "2026-09-22T17:00:00.000Z",
+        action: "erase",
+        element_type: "freedraw",
+        element_id: "erased",
         element_version: 2,
       },
     ]);

@@ -138,6 +138,7 @@ export class ClassroomAudioRecorder {
 
     await stopPromise;
     await Promise.allSettled(this.pendingUploads);
+    this.pendingUploads.clear();
 
     this.stream?.getTracks().forEach((track) => track.stop());
     this.stream = null;

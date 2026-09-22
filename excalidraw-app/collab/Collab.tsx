@@ -132,7 +132,6 @@ export interface ClassroomCaptureState {
   isRecording: boolean;
   isPaused: boolean;
   audioFiles: AudioFileRef[];
-  eventCount: number;
   exportInProgress: boolean;
   errorMessage: string | null;
 }
@@ -145,7 +144,6 @@ const DEFAULT_CLASSROOM_CAPTURE_STATE: ClassroomCaptureState = {
   isRecording: false,
   isPaused: false,
   audioFiles: [],
-  eventCount: 0,
   exportInProgress: false,
   errorMessage: null,
 };
@@ -546,11 +544,6 @@ class Collab extends PureComponent<CollabProps, CollabState> {
     }
 
     this.pendingWhiteboardEvents.push(...events);
-    this.setClassroomCaptureState({
-      eventCount:
-        appJotaiStore.get(classroomCaptureStateAtom)!.eventCount +
-        events.length,
-    });
     this.queueFlushWhiteboardEvents();
   };
 
@@ -768,7 +761,7 @@ class Collab extends PureComponent<CollabProps, CollabState> {
     }
   };
 
-  stopCollaboration = (keepRemoteState = true) => {
+  stopCollaboration = async (keepRemoteState = true) => {
     this.queueBroadcastAllElements.cancel();
     this.queueSaveToFirebase.cancel();
     this.loadImageFiles.cancel();
@@ -788,11 +781,11 @@ class Collab extends PureComponent<CollabProps, CollabState> {
     }
 
     if (!keepRemoteState) {
-      void this.teardownClassroomSession();
+      await this.teardownClassroomSession();
       LocalData.fileStorage.reset();
       this.destroySocketClient();
     } else if (window.confirm(t("alerts.collabStopOverridePrompt"))) {
-      void this.teardownClassroomSession();
+      await this.teardownClassroomSession();
       // hack to ensure that we prefer we disregard any new browser state
       // that could have been saved in other tabs while we were collaborating
       resetBrowserStateVersions();
