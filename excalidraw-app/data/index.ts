@@ -160,7 +160,25 @@ export const getCollaborationLink = (data: {
   roomId: string;
   roomKey: string;
 }) => {
-  return `${window.location.origin}${window.location.pathname}#room=${data.roomId},${data.roomKey}`;
+  const url = new URL(window.location.href);
+  const classroomSearchParams = new URLSearchParams();
+
+  for (const key of [
+    "classroom",
+    "artifact_id",
+    "project_group",
+    "essay_name",
+    "context",
+  ]) {
+    const value = url.searchParams.get(key);
+    if (value !== null) {
+      classroomSearchParams.set(key, value);
+    }
+  }
+
+  url.search = classroomSearchParams.toString();
+  url.hash = `room=${data.roomId},${data.roomKey}`;
+  return url.toString();
 };
 
 /**

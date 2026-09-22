@@ -95,12 +95,14 @@ import {
 } from "./app_constants";
 import Collab, {
   collabAPIAtom,
+  classroomCaptureStateAtom,
   isCollaboratingAtom,
   isOfflineAtom,
   userToFollowAtom,
 } from "./collab/Collab";
 import { AppFooter } from "./components/AppFooter";
 import { AppMainMenu } from "./components/AppMainMenu";
+import { ClassroomSessionControls } from "./components/ClassroomSessionControls";
 import { AppWelcomeScreen } from "./components/AppWelcomeScreen";
 import {
   ExportToExcalidrawPlus,
@@ -116,6 +118,7 @@ import {
 } from "./data";
 
 import { updateStaleImageStatuses } from "./data/FileManager";
+import { isClassroomModeEnabled } from "./data/whiteboardCapture";
 import { FileStatusStore } from "./data/fileStatusStore";
 import {
   importFromLocalStorage,
@@ -407,11 +410,18 @@ const ExcalidrawWrapper = () => {
 
   const [, setShareDialogState] = useAtom(shareDialogStateAtom);
   const [collabAPI] = useAtom(collabAPIAtom);
+  const classroomCaptureState = useAtomValue(classroomCaptureStateAtom);
   const [isCollaborating] = useAtomWithInitialValue(isCollaboratingAtom, () => {
     return isCollaborationLink(window.location.href);
   });
   const collabError = useAtomValue(collabErrorIndicatorAtom);
   const userToFollow = useAtomValue(userToFollowAtom);
+  const classroomModeEnabled = useMemo(
+    () =>
+      collabAPI?.isClassroomModeEnabled() ||
+      isClassroomModeEnabled(window.location.href),
+    [collabAPI],
+  );
 
   const viewportStatusFrame = useMemo(
     () =>
@@ -992,6 +1002,18 @@ const ExcalidrawWrapper = () => {
         autoFocus={true}
         theme={editorTheme}
         onThemeChange={setAppTheme}
+        currentUserControls={
+          classroomModeEnabled && collabAPI
+            ? (isMobile) => (
+                <ClassroomSessionControls
+                  collabAPI={collabAPI}
+                  captureState={classroomCaptureState}
+                  isCollaborating={isCollaborating}
+                  compact={isMobile}
+                />
+              )
+            : undefined
+        }
         renderTopRightUI={(isMobile) => {
           if (isMobile || !collabAPI || isCollabDisabled) {
             return null;
@@ -1006,6 +1028,13 @@ const ExcalidrawWrapper = () => {
               )}
 
               {collabError.message && <CollabError collabError={collabError} />}
+              {classroomModeEnabled && !isCollaborating && (
+                <ClassroomSessionControls
+                  collabAPI={collabAPI}
+                  captureState={classroomCaptureState}
+                  isCollaborating={false}
+                />
+              )}
               <LiveCollaborationTrigger
                 isCollaborating={isCollaborating}
                 onSelect={() =>

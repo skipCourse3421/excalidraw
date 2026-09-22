@@ -52,6 +52,13 @@ import type {
 } from "@excalidraw/excalidraw/types";
 import type { Mutable, ValueOf } from "@excalidraw/common/utility-types";
 
+import type {
+  AudioFileRef,
+  CaptureBundleManifest,
+  ParticipantRef,
+  WhiteboardEvent,
+} from "@excalidraw/common";
+
 import { appJotaiStore, atom } from "../app-jotai";
 import {
   CURSOR_SYNC_TIMEOUT,
@@ -76,17 +83,32 @@ import {
 import { FileStatusStore } from "../data/fileStatusStore";
 import { LocalData } from "../data/LocalData";
 import {
+  appendAudioFileToWhiteboardSession,
+  createOrJoinWhiteboardSession,
+  ensureFirebaseUser,
+  flushWhiteboardEventsToFirebase,
+  getFirebaseIdToken,
   isSavedToFirebase,
   loadFilesFromFirebase,
   loadFromFirebase,
+  markWhiteboardSessionParticipantLeft,
   saveFilesToFirebase,
+  saveBlobToFirebase,
   saveToFirebase,
+  updateWhiteboardSessionManifest,
 } from "../data/firebase";
 import {
   importUsernameFromLocalStorage,
   saveUsernameToLocalStorage,
 } from "../data/localStorage";
 import { resetBrowserStateVersions } from "../data/tabSync";
+import { ClassroomAudioRecorder } from "../data/ClassroomAudioRecorder";
+import {
+  buildCaptureBundleManifest,
+  deriveWhiteboardEvents,
+  getClassroomSessionMetadata,
+  isClassroomModeEnabled as isClassroomModeEnabledForUrl,
+} from "../data/whiteboardCapture";
 
 import { collabErrorIndicatorAtom } from "./CollabError";
 import Portal from "./Portal";
@@ -99,6 +121,36 @@ import type {
 export const collabAPIAtom = atom<CollabAPI | null>(null);
 export const isCollaboratingAtom = atom(false);
 export const isOfflineAtom = atom(false);
+
+type ClassroomRole = ParticipantRef["role"];
+
+export interface ClassroomCaptureState {
+  enabled: boolean;
+  sessionId: string | null;
+  role: ClassroomRole | null;
+  startedAt: string | null;
+  isRecording: boolean;
+  isPaused: boolean;
+  audioFiles: AudioFileRef[];
+  exportInProgress: boolean;
+  errorMessage: string | null;
+}
+
+const DEFAULT_CLASSROOM_CAPTURE_STATE: ClassroomCaptureState = {
+  enabled: false,
+  sessionId: null,
+  role: null,
+  startedAt: null,
+  isRecording: false,
+  isPaused: false,
+  audioFiles: [],
+  exportInProgress: false,
+  errorMessage: null,
+};
+
+export const classroomCaptureStateAtom = atom<ClassroomCaptureState>(
+  DEFAULT_CLASSROOM_CAPTURE_STATE,
+);
 
 interface CollabState {
   errorMessage: string | null;
@@ -126,6 +178,13 @@ export interface CollabAPI {
   getActiveRoomLink: CollabInstance["getActiveRoomLink"];
   setCollabError: CollabInstance["setErrorDialog"];
   setUserToFollow: CollabInstance["setUserToFollow"];
+  isClassroomModeEnabled: CollabInstance["isClassroomModeEnabled"];
+  startClassroomSession: CollabInstance["startClassroomSession"];
+  startClassroomRecording: CollabInstance["startClassroomRecording"];
+  pauseClassroomRecording: CollabInstance["pauseClassroomRecording"];
+  resumeClassroomRecording: CollabInstance["resumeClassroomRecording"];
+  stopClassroomRecording: CollabInstance["stopClassroomRecording"];
+  exportClassroomSession: CollabInstance["exportClassroomSession"];
 }
 
 interface CollabProps {
@@ -144,6 +203,16 @@ class Collab extends PureComponent<CollabProps, CollabState> {
   private collaborators = new Map<SocketId, Collaborator>();
   /** the socket ids of the users following the current user */
   private followedBy = new Set<SocketId>();
+  private classroomAudioRecorder: ClassroomAudioRecorder | null = null;
+  private classroomSessionId: string | null = null;
+  private classroomRole: ClassroomRole | null = null;
+  private classroomStartedAt: string | null = null;
+  private classroomStudentId: string | null = null;
+  private classroomUserId: string | null = null;
+  private classroomParticipants: ParticipantRef[] = [];
+  private classroomAudioFiles: AudioFileRef[] = [];
+  private pendingWhiteboardEvents = [] as WhiteboardEvent[];
+  private lastCapturedElements = [] as readonly OrderedExcalidrawElement[];
 
   constructor(props: CollabProps) {
     super(props);
@@ -246,9 +315,17 @@ class Collab extends PureComponent<CollabProps, CollabState> {
       getActiveRoomLink: this.getActiveRoomLink,
       setCollabError: this.setErrorDialog,
       setUserToFollow: this.setUserToFollow,
+      isClassroomModeEnabled: this.isClassroomModeEnabled,
+      startClassroomSession: this.startClassroomSession,
+      startClassroomRecording: this.startClassroomRecording,
+      pauseClassroomRecording: this.pauseClassroomRecording,
+      resumeClassroomRecording: this.resumeClassroomRecording,
+      stopClassroomRecording: this.stopClassroomRecording,
+      exportClassroomSession: this.exportClassroomSession,
     };
 
     appJotaiStore.set(collabAPIAtom, collabAPI);
+    this.resetClassroomCaptureState();
 
     if (isTestEnv() || isDevEnv()) {
       window.collab = window.collab || ({} as Window["collab"]);
@@ -261,11 +338,66 @@ class Collab extends PureComponent<CollabProps, CollabState> {
     }
   }
 
+  private setClassroomCaptureState = (
+    updates: Partial<ClassroomCaptureState>,
+  ) => {
+    appJotaiStore.set(classroomCaptureStateAtom, {
+      ...appJotaiStore.get(classroomCaptureStateAtom)!,
+      ...updates,
+    });
+  };
+
+  private resetClassroomCaptureState = () => {
+    appJotaiStore.set(classroomCaptureStateAtom, {
+      ...DEFAULT_CLASSROOM_CAPTURE_STATE,
+      enabled: this.isClassroomModeEnabled(),
+    });
+  };
+
+  private flushPendingWhiteboardEvents = async () => {
+    if (!this.classroomSessionId || !this.pendingWhiteboardEvents.length) {
+      return;
+    }
+
+    const events = this.pendingWhiteboardEvents.splice(
+      0,
+      this.pendingWhiteboardEvents.length,
+    );
+
+    try {
+      await flushWhiteboardEventsToFirebase({
+        sessionId: this.classroomSessionId,
+        events,
+      });
+    } catch (error: any) {
+      this.pendingWhiteboardEvents.unshift(...events);
+      this.setClassroomCaptureState({
+        errorMessage: error.message || t("errors.collabSaveFailed"),
+      });
+      console.error(error);
+      throw error;
+    }
+  };
+
+  /**
+   * Classroom mode keeps the UI responsive by batching local whiteboard events
+   * in memory and flushing them to Firestore on a short throttle instead of
+   * writing once per element mutation.
+   */
+  private queueFlushWhiteboardEvents = throttle(
+    () => {
+      void this.flushPendingWhiteboardEvents().catch(() => {});
+    },
+    2000,
+    { leading: false },
+  );
+
   onOfflineStatusToggle = () => {
     appJotaiStore.set(isOfflineAtom, !window.navigator.onLine);
   };
 
   componentWillUnmount() {
+    void this.teardownClassroomSession();
     window.removeEventListener("online", this.onOfflineStatusToggle);
     window.removeEventListener("offline", this.onOfflineStatusToggle);
     window.removeEventListener(EVENT.BEFORE_UNLOAD, this.beforeUnload);
@@ -284,12 +416,257 @@ class Collab extends PureComponent<CollabProps, CollabState> {
       this.idleTimeoutId = null;
     }
     this.onUmmount?.();
+    this.resetClassroomCaptureState();
   }
 
   isCollaborating = () => appJotaiStore.get(isCollaboratingAtom)!;
 
+  isClassroomModeEnabled = () =>
+    isClassroomModeEnabledForUrl(window.location.href);
+
   private setIsCollaborating = (isCollaborating: boolean) => {
     appJotaiStore.set(isCollaboratingAtom, isCollaborating);
+  };
+
+  startClassroomSession = async () => {
+    if (!this.isClassroomModeEnabled() || this.portal.socket) {
+      return null;
+    }
+
+    return this.startCollaboration(null);
+  };
+
+  private syncClassroomManifestState = (manifest: CaptureBundleManifest) => {
+    this.classroomSessionId = manifest.session_id;
+    this.classroomStartedAt = manifest.started_at;
+    this.classroomParticipants = manifest.participants;
+    this.classroomAudioFiles = manifest.files.audio;
+
+    this.setClassroomCaptureState({
+      enabled: true,
+      sessionId: manifest.session_id,
+      role: this.classroomRole,
+      startedAt: manifest.started_at,
+      audioFiles: manifest.files.audio,
+      errorMessage: null,
+    });
+  };
+
+  private initializeClassroomAudioRecorder = () => {
+    if (!this.classroomSessionId || this.classroomAudioRecorder) {
+      return;
+    }
+
+    this.classroomAudioRecorder = new ClassroomAudioRecorder({
+      ownerWindow: window,
+      onSegment: async (audioFile, blob) => {
+        await saveBlobToFirebase({
+          path: `${FIREBASE_STORAGE_PREFIXES.whiteboardSessions}/${this.classroomSessionId}/${audioFile.path}`,
+          blob,
+          contentType: audioFile.mime_type,
+        });
+
+        const manifest = await appendAudioFileToWhiteboardSession({
+          sessionId: this.classroomSessionId!,
+          audioFile,
+        });
+
+        if (manifest) {
+          this.syncClassroomManifestState(manifest);
+        }
+      },
+    });
+  };
+
+  private initializeClassroomSession = async ({
+    sessionId,
+    role,
+  }: {
+    sessionId: string;
+    role: ClassroomRole;
+  }) => {
+    const user = await ensureFirebaseUser();
+
+    const now = new Date().toISOString();
+    const displayName = user.displayName || this.state.username || user.uid;
+    const participant: ParticipantRef = {
+      user_id: user.uid,
+      display_name: displayName,
+      role,
+      joined_at: now,
+      left_at: null,
+    };
+    const sessionMetadata = getClassroomSessionMetadata(window.location.href);
+    const manifest = await createOrJoinWhiteboardSession({
+      sessionId,
+      participant,
+      startedAt: now,
+      studentId: role === "student" ? user.uid : null,
+      artifactId: sessionMetadata.artifact_id,
+      projectGroup: sessionMetadata.project_group,
+      essayName: sessionMetadata.essay_name,
+      context: sessionMetadata.context,
+    });
+
+    this.classroomRole = role;
+    this.classroomUserId = user.uid;
+    this.classroomStudentId = manifest.student_id;
+    this.lastCapturedElements =
+      this.excalidrawAPI.getSceneElementsIncludingDeleted();
+    this.syncClassroomManifestState(manifest);
+    this.initializeClassroomAudioRecorder();
+  };
+
+  private captureLocalWhiteboardEvents = (
+    elements: readonly OrderedExcalidrawElement[],
+  ) => {
+    if (!this.classroomSessionId || !this.classroomUserId) {
+      this.lastCapturedElements = elements;
+      return;
+    }
+
+    const events = deriveWhiteboardEvents({
+      previousElements: this.lastCapturedElements,
+      nextElements: elements,
+      sessionId: this.classroomSessionId,
+      userId: this.classroomUserId,
+      timestamp: new Date().toISOString(),
+    });
+
+    this.lastCapturedElements = elements;
+
+    if (!events.length) {
+      return;
+    }
+
+    this.pendingWhiteboardEvents.push(...events);
+    this.queueFlushWhiteboardEvents();
+  };
+
+  startClassroomRecording = async () => {
+    if (!this.classroomAudioRecorder || !this.classroomSessionId) {
+      return;
+    }
+
+    try {
+      await this.classroomAudioRecorder.start();
+      this.setClassroomCaptureState({
+        isRecording: true,
+        isPaused: false,
+        errorMessage: null,
+      });
+    } catch (error: any) {
+      this.setClassroomCaptureState({
+        errorMessage: error.message,
+      });
+      this.setErrorDialog(error.message);
+    }
+  };
+
+  pauseClassroomRecording = () => {
+    this.classroomAudioRecorder?.pause();
+    this.setClassroomCaptureState({
+      isRecording: false,
+      isPaused: true,
+    });
+  };
+
+  resumeClassroomRecording = () => {
+    this.classroomAudioRecorder?.resume();
+    this.setClassroomCaptureState({
+      isRecording: true,
+      isPaused: false,
+    });
+  };
+
+  stopClassroomRecording = async (opts?: { keepReady?: boolean }) => {
+    try {
+      await this.classroomAudioRecorder?.stop();
+    } finally {
+      this.setClassroomCaptureState({
+        isRecording: false,
+        isPaused: false,
+      });
+      if (opts?.keepReady === false) {
+        this.classroomAudioRecorder = null;
+      }
+    }
+  };
+
+  exportClassroomSession = async () => {
+    if (!this.classroomSessionId) {
+      return;
+    }
+
+    this.setClassroomCaptureState({
+      exportInProgress: true,
+      errorMessage: null,
+    });
+
+    try {
+      if (
+        this.classroomAudioRecorder &&
+        this.classroomAudioRecorder.status !== "inactive"
+      ) {
+        await this.stopClassroomRecording({ keepReady: false });
+      }
+
+      await this.flushPendingWhiteboardEvents();
+
+      const endedAt = new Date().toISOString();
+      const sessionMetadata = getClassroomSessionMetadata(window.location.href);
+      const manifest = await updateWhiteboardSessionManifest({
+        sessionId: this.classroomSessionId,
+        updates: buildCaptureBundleManifest({
+          sessionId: this.classroomSessionId,
+          studentId: this.classroomStudentId,
+          participants: this.classroomParticipants,
+          startedAt: this.classroomStartedAt || endedAt,
+          endedAt,
+          audioFiles: this.classroomAudioFiles,
+          artifactId: sessionMetadata.artifact_id,
+          projectGroup: sessionMetadata.project_group,
+          essayName: sessionMetadata.essay_name,
+          context: sessionMetadata.context,
+        }),
+      });
+
+      if (manifest) {
+        this.syncClassroomManifestState(manifest);
+      }
+
+      const idToken = await getFirebaseIdToken();
+      if (!idToken) {
+        throw new Error("Classroom export requires a signed-in Firebase user.");
+      }
+
+      const response = await fetch(
+        import.meta.env.VITE_APP_EXPORT_WHITEBOARD_SESSION_URL ||
+          "/exportWhiteboardSession",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer ".concat(idToken),
+          },
+          body: JSON.stringify({ session_id: this.classroomSessionId }),
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error("Whiteboard export failed.");
+      }
+    } catch (error: any) {
+      this.setClassroomCaptureState({
+        errorMessage: error.message || "Whiteboard export failed.",
+      });
+      this.setErrorDialog(error.message || "Whiteboard export failed.");
+      console.error(error);
+    } finally {
+      this.setClassroomCaptureState({
+        exportInProgress: false,
+      });
+    }
   };
 
   private onUnload = () => {
@@ -362,7 +739,28 @@ class Collab extends PureComponent<CollabProps, CollabState> {
     }
   };
 
-  stopCollaboration = (keepRemoteState = true) => {
+  private teardownClassroomSession = async () => {
+    this.queueFlushWhiteboardEvents.cancel();
+
+    if (
+      this.classroomAudioRecorder &&
+      this.classroomAudioRecorder.status !== "inactive"
+    ) {
+      await this.stopClassroomRecording({ keepReady: false });
+    }
+
+    await this.flushPendingWhiteboardEvents();
+
+    if (this.classroomSessionId && this.classroomUserId) {
+      await markWhiteboardSessionParticipantLeft({
+        sessionId: this.classroomSessionId,
+        userId: this.classroomUserId,
+        leftAt: new Date().toISOString(),
+      });
+    }
+  };
+
+  stopCollaboration = async (keepRemoteState = true) => {
     this.queueBroadcastAllElements.cancel();
     this.queueSaveToFirebase.cancel();
     this.loadImageFiles.cancel();
@@ -382,9 +780,11 @@ class Collab extends PureComponent<CollabProps, CollabState> {
     }
 
     if (!keepRemoteState) {
+      await this.teardownClassroomSession();
       LocalData.fileStorage.reset();
       this.destroySocketClient();
     } else if (window.confirm(t("alerts.collabStopOverridePrompt"))) {
+      await this.teardownClassroomSession();
       // hack to ensure that we prefer we disregard any new browser state
       // that could have been saved in other tabs while we were collaborating
       resetBrowserStateVersions();
@@ -416,6 +816,16 @@ class Collab extends PureComponent<CollabProps, CollabState> {
     this.fileManager.reset();
     this.followedBy = new Set();
     if (!opts?.isUnload) {
+      this.classroomAudioRecorder = null;
+      this.classroomSessionId = null;
+      this.classroomRole = null;
+      this.classroomStartedAt = null;
+      this.classroomStudentId = null;
+      this.classroomUserId = null;
+      this.classroomParticipants = [];
+      this.classroomAudioFiles = [];
+      this.pendingWhiteboardEvents = [];
+      this.lastCapturedElements = [];
       this.setIsCollaborating(false);
       this.setActiveRoomLink(null);
       appJotaiStore.set(userToFollowAtom, null);
@@ -424,6 +834,7 @@ class Collab extends PureComponent<CollabProps, CollabState> {
         collaborators: this.collaborators,
       });
       LocalData.resumeSave("collaboration");
+      this.resetClassroomCaptureState();
     }
   };
 
@@ -504,6 +915,20 @@ class Collab extends PureComponent<CollabProps, CollabState> {
         APP_NAME,
         getCollaborationLink({ roomId, roomKey }),
       );
+    }
+
+    if (this.isClassroomModeEnabled()) {
+      try {
+        await this.initializeClassroomSession({
+          sessionId: roomId,
+          role: existingRoomLinkData ? "student" : "teacher",
+        });
+      } catch (error: any) {
+        this.setErrorDialog(error.message);
+        return null;
+      }
+    } else {
+      this.resetClassroomCaptureState();
     }
 
     // TODO: `ImportedDataState` type here seems abused
@@ -815,6 +1240,7 @@ class Collab extends PureComponent<CollabProps, CollabState> {
       captureUpdate: CaptureUpdateAction.NEVER,
     });
 
+    this.lastCapturedElements = elements;
     this.loadImageFiles();
   };
 
@@ -962,6 +1388,7 @@ class Collab extends PureComponent<CollabProps, CollabState> {
       getSceneVersion(elements) >
       this.getLastBroadcastedOrReceivedSceneVersion()
     ) {
+      this.captureLocalWhiteboardEvents(elements);
       this.portal.broadcastScene(WS_SUBTYPES.UPDATE, elements, false);
       this.lastBroadcastedOrReceivedSceneVersion = getSceneVersion(elements);
       this.queueBroadcastAllElements();

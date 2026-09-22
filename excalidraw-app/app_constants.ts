@@ -32,6 +32,7 @@ export enum WS_SUBTYPES {
 export const FIREBASE_STORAGE_PREFIXES = {
   shareLinkFiles: `/files/shareLinks`,
   collabFiles: `/files/rooms`,
+  whiteboardSessions: `/files/whiteboard-sessions`,
 };
 
 export const ROOM_ID_BYTES = 10;

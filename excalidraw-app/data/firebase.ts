@@ -8,12 +8,15 @@ import {
 import { restoreElements } from "@excalidraw/excalidraw/data/restore";
 import { getSceneVersion } from "@excalidraw/element";
 import { initializeApp } from "firebase/app";
+import { getAuth, onAuthStateChanged, signInAnonymously } from "firebase/auth";
 import {
+  collection,
   getFirestore,
   doc,
   getDoc,
   runTransaction,
   Bytes,
+  writeBatch,
 } from "firebase/firestore";
 import { getStorage, ref, uploadBytes } from "firebase/storage";
 
@@ -30,7 +33,19 @@ import type {
   DataURL,
 } from "@excalidraw/excalidraw/types";
 
+import type {
+  AudioFileRef,
+  CaptureBundleManifest,
+  ParticipantRef,
+  WhiteboardEvent,
+} from "@excalidraw/common";
+
 import { FILE_CACHE_MAX_AGE_SEC } from "../app_constants";
+
+import {
+  buildCaptureBundleManifest,
+  WHITEBOARD_EVENT_LOG_PATH,
+} from "./whiteboardCapture";
 
 import { getSyncableElements } from ".";
 
@@ -56,6 +71,7 @@ try {
 let firebaseApp: ReturnType<typeof initializeApp> | null = null;
 let firestore: ReturnType<typeof getFirestore> | null = null;
 let firebaseStorage: ReturnType<typeof getStorage> | null = null;
+let firebaseAuth: ReturnType<typeof getAuth> | null = null;
 
 const _initializeFirebase = () => {
   if (!firebaseApp) {
@@ -78,11 +94,55 @@ const _getStorage = () => {
   return firebaseStorage;
 };
 
+const _getAuth = () => {
+  if (!firebaseAuth) {
+    firebaseAuth = getAuth(_initializeFirebase());
+  }
+  return firebaseAuth;
+};
+
 // -----------------------------------------------------------------------------
 
 export const loadFirebaseStorage = async () => {
   return _getStorage();
 };
+
+export const loadFirebaseAuth = async () => {
+  return _getAuth();
+};
+
+export const ensureFirebaseUser = async () => {
+  const auth = _getAuth();
+  if (auth.currentUser) {
+    return auth.currentUser;
+  }
+
+  const restoredUser = await new Promise<
+    ReturnType<typeof getAuth>["currentUser"]
+  >((resolve, reject) => {
+    const unsubscribe = onAuthStateChanged(
+      auth,
+      (user) => {
+        unsubscribe();
+        resolve(user);
+      },
+      reject,
+    );
+  });
+
+  if (restoredUser) {
+    return restoredUser;
+  }
+
+  return (await signInAnonymously(auth)).user;
+};
+
+export const getFirebaseIdToken = async () => {
+  const user = await ensureFirebaseUser();
+  return user?.getIdToken() ?? null;
+};
+
+export const getFirebaseUser = () => _getAuth().currentUser;
 
 type FirebaseStoredScene = {
   sceneVersion: number;
@@ -169,6 +229,345 @@ export const saveFilesToFirebase = async ({
   );
 
   return { savedFiles, erroredFiles };
+};
+
+export const saveBlobToFirebase = async ({
+  path,
+  blob,
+  contentType,
+}: {
+  path: string;
+  blob: Blob;
+  contentType?: string;
+}) => {
+  const storage = await loadFirebaseStorage();
+  const storageRef = ref(storage, path);
+  await uploadBytes(storageRef, blob, {
+    contentType: contentType || blob.type,
+    cacheControl: "private, max-age=0",
+  });
+};
+
+const getWhiteboardSessionDocRef = (sessionId: string) =>
+  doc(_getFirestore(), "whiteboard_sessions", sessionId);
+
+const mergeParticipant = (
+  participants: ParticipantRef[],
+  participant: ParticipantRef,
+) => {
+  const nextParticipants = [...participants];
+  const index = nextParticipants.findIndex(
+    (existingParticipant) =>
+      existingParticipant.user_id === participant.user_id,
+  );
+
+  if (index >= 0) {
+    nextParticipants[index] = {
+      ...nextParticipants[index],
+      ...participant,
+    };
+  } else {
+    nextParticipants.push(participant);
+  }
+
+  return nextParticipants;
+};
+
+const appendAudioFile = (
+  audioFiles: AudioFileRef[],
+  audioFile: AudioFileRef,
+) => {
+  if (
+    audioFiles.some(
+      (existingAudioFile) => existingAudioFile.path === audioFile.path,
+    )
+  ) {
+    return audioFiles;
+  }
+
+  return [...audioFiles, audioFile];
+};
+
+const getParticipantIds = (participants: ParticipantRef[]) => [
+  ...new Set(participants.map((participant) => participant.user_id)),
+];
+
+const getManifestFromSnapshot = (
+  sessionId: string,
+  snapshotData:
+    | {
+        manifest?: CaptureBundleManifest;
+      }
+    | undefined,
+  defaults: {
+    startedAt: string;
+    studentId: string | null;
+    artifactId?: string | null;
+    projectGroup?: string | null;
+    essayName?: string;
+    context?: string;
+  },
+) => {
+  return (
+    snapshotData?.manifest ??
+    buildCaptureBundleManifest({
+      sessionId,
+      studentId: defaults.studentId,
+      participants: [],
+      startedAt: defaults.startedAt,
+      endedAt: defaults.startedAt,
+      audioFiles: [],
+      artifactId: defaults.artifactId,
+      projectGroup: defaults.projectGroup,
+      essayName: defaults.essayName,
+      context: defaults.context,
+    })
+  );
+};
+
+export const createOrJoinWhiteboardSession = async ({
+  sessionId,
+  participant,
+  startedAt,
+  studentId,
+  artifactId,
+  projectGroup,
+  essayName,
+  context,
+}: {
+  sessionId: string;
+  participant: ParticipantRef;
+  startedAt: string;
+  studentId: string | null;
+  artifactId?: string | null;
+  projectGroup?: string | null;
+  essayName?: string;
+  context?: string;
+}) => {
+  const firestore = _getFirestore();
+  const sessionDocRef = getWhiteboardSessionDocRef(sessionId);
+
+  return runTransaction(firestore, async (transaction) => {
+    const snapshot = await transaction.get(sessionDocRef);
+    const manifest = getManifestFromSnapshot(
+      sessionId,
+      snapshot.data() as { manifest?: CaptureBundleManifest } | undefined,
+      {
+        startedAt,
+        studentId,
+        artifactId,
+        projectGroup,
+        essayName,
+        context,
+      },
+    );
+
+    const nextManifest: CaptureBundleManifest = {
+      ...manifest,
+      student_id: manifest.student_id ?? studentId,
+      artifact_id: manifest.artifact_id ?? artifactId,
+      project_group: manifest.project_group ?? projectGroup,
+      essay_name: manifest.essay_name ?? essayName,
+      context: manifest.context ?? context,
+      participants: mergeParticipant(manifest.participants, participant),
+      ended_at: manifest.ended_at || startedAt,
+      files: {
+        ...manifest.files,
+        event_log: manifest.files.event_log || WHITEBOARD_EVENT_LOG_PATH,
+      },
+    };
+
+    transaction.set(
+      sessionDocRef,
+      {
+        manifest: nextManifest,
+        participant_ids: getParticipantIds(nextManifest.participants),
+        updated_at: new Date().toISOString(),
+      },
+      { merge: true },
+    );
+
+    return nextManifest;
+  });
+};
+
+export const markWhiteboardSessionParticipantLeft = async ({
+  sessionId,
+  userId,
+  leftAt,
+}: {
+  sessionId: string;
+  userId: string;
+  leftAt: string;
+}) => {
+  const firestore = _getFirestore();
+  const sessionDocRef = getWhiteboardSessionDocRef(sessionId);
+
+  return runTransaction(firestore, async (transaction) => {
+    const snapshot = await transaction.get(sessionDocRef);
+    if (!snapshot.exists()) {
+      return null;
+    }
+
+    const snapshotData = snapshot.data() as {
+      manifest?: CaptureBundleManifest;
+    };
+    const manifest = snapshotData.manifest;
+    if (!manifest) {
+      return null;
+    }
+
+    const participants = manifest.participants.map((participant) =>
+      participant.user_id === userId
+        ? { ...participant, left_at: leftAt }
+        : participant,
+    );
+
+    const nextManifest = {
+      ...manifest,
+      participants,
+    };
+
+    transaction.set(
+      sessionDocRef,
+      {
+        manifest: nextManifest,
+        participant_ids: getParticipantIds(nextManifest.participants),
+        updated_at: leftAt,
+      },
+      { merge: true },
+    );
+
+    return nextManifest;
+  });
+};
+
+export const appendAudioFileToWhiteboardSession = async ({
+  sessionId,
+  audioFile,
+}: {
+  sessionId: string;
+  audioFile: AudioFileRef;
+}) => {
+  const firestore = _getFirestore();
+  const sessionDocRef = getWhiteboardSessionDocRef(sessionId);
+
+  return runTransaction(firestore, async (transaction) => {
+    const snapshot = await transaction.get(sessionDocRef);
+    if (!snapshot.exists()) {
+      return null;
+    }
+
+    const snapshotData = snapshot.data() as {
+      manifest?: CaptureBundleManifest;
+    };
+    const manifest = snapshotData.manifest;
+    if (!manifest) {
+      return null;
+    }
+
+    const nextManifest = {
+      ...manifest,
+      files: {
+        ...manifest.files,
+        audio: appendAudioFile(manifest.files.audio, audioFile),
+      },
+    };
+
+    transaction.set(
+      sessionDocRef,
+      {
+        manifest: nextManifest,
+        participant_ids: getParticipantIds(nextManifest.participants),
+        updated_at: new Date().toISOString(),
+      },
+      { merge: true },
+    );
+
+    return nextManifest;
+  });
+};
+
+export const updateWhiteboardSessionManifest = async ({
+  sessionId,
+  updates,
+}: {
+  sessionId: string;
+  updates: Partial<CaptureBundleManifest>;
+}) => {
+  const firestore = _getFirestore();
+  const sessionDocRef = getWhiteboardSessionDocRef(sessionId);
+  return runTransaction(firestore, async (transaction) => {
+    const snapshot = await transaction.get(sessionDocRef);
+    if (!snapshot.exists()) {
+      return null;
+    }
+
+    const manifest = (snapshot.data() as { manifest?: CaptureBundleManifest })
+      .manifest;
+    if (!manifest) {
+      return null;
+    }
+
+    const nextManifest: CaptureBundleManifest = {
+      ...manifest,
+      ...updates,
+      participants: updates.participants
+        ? updates.participants.reduce(mergeParticipant, manifest.participants)
+        : manifest.participants,
+      files: {
+        ...manifest.files,
+        ...updates.files,
+        audio: updates.files?.audio
+          ? updates.files.audio.reduce(appendAudioFile, manifest.files.audio)
+          : manifest.files.audio,
+      },
+    };
+
+    transaction.set(
+      sessionDocRef,
+      {
+        manifest: nextManifest,
+        participant_ids: getParticipantIds(nextManifest.participants),
+        updated_at: new Date().toISOString(),
+      },
+      { merge: true },
+    );
+
+    return nextManifest;
+  });
+};
+
+export const flushWhiteboardEventsToFirebase = async ({
+  sessionId,
+  events,
+}: {
+  sessionId: string;
+  events: readonly WhiteboardEvent[];
+}) => {
+  if (!events.length) {
+    return;
+  }
+
+  const firestore = _getFirestore();
+  const eventsCollectionRef = collection(
+    firestore,
+    "whiteboard_sessions",
+    sessionId,
+    "events",
+  );
+
+  for (let index = 0; index < events.length; index += 500) {
+    const batch = writeBatch(firestore);
+
+    for (const event of events.slice(index, index + 500)) {
+      batch.set(doc(eventsCollectionRef, event.event_id), event, {
+        merge: true,
+      });
+    }
+
+    await batch.commit();
+  }
 };
 
 const createFirebaseSceneDocument = async (

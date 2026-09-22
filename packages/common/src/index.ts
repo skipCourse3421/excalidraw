@@ -12,6 +12,7 @@ export * from "./url";
 export * from "./utils";
 export * from "./emitter";
 export * from "./appEventBus";
+export * from "./captureBundle";
 export * from "./editorInterface";
 export * from "./versionedSnapshotStore";
 export { Debug } from "../debug";

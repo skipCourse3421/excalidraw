@@ -1,9 +1,43 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isWhiteboardParticipant(participantIds) {
+      return isSignedIn() && participantIds.hasAny([request.auth.uid]);
+    }
+
+    match /scenes/{document} {
       allow get, write: if true;
-      // never set this to true, otherwise anyone can delete anyone else's drawing.
+      allow list: if false;
+    }
+
+    match /whiteboard_sessions/{sessionId} {
+      allow get: if isWhiteboardParticipant(resource.data.participant_ids);
+      allow create: if isWhiteboardParticipant(request.resource.data.participant_ids)
+        && request.resource.data.manifest.session_id == sessionId;
+      allow update: if isWhiteboardParticipant(resource.data.participant_ids)
+        && isWhiteboardParticipant(request.resource.data.participant_ids)
+        && request.resource.data.manifest.session_id == sessionId;
+      allow list: if false;
+    }
+
+    match /whiteboard_sessions/{sessionId}/events/{eventId} {
+      allow get, list: if isWhiteboardParticipant(
+        get(/databases/$(database)/documents/whiteboard_sessions/$(sessionId)).data.participant_ids
+      );
+      allow create, update: if isWhiteboardParticipant(
+          get(/databases/$(database)/documents/whiteboard_sessions/$(sessionId)).data.participant_ids
+        )
+        && request.resource.data.event_id == eventId
+        && request.resource.data.session_id == sessionId
+        && request.resource.data.user_id == request.auth.uid;
+    }
+
+    match /{document=**} {
+      allow get, write: if false;
       allow list: if false;
     }
   }
